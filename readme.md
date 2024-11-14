@@ -421,6 +421,220 @@ async function setupDelayQueue() {
 setupDelayQueue().catch(console.error);
 
 ```
+## Dead Letter Queue (DLQ) and Retry Mechanism with RabbitMQ
+
+This setup configures a **Dead Letter Queue (DLQ)** and retry mechanism for message handling in RabbitMQ, ensuring that failed messages can be retried a specified number of times. If a message continues to fail, it will eventually be routed to a **final dead letter queue**.
+
+## Overview
+
+### Components
+
+1. **Main Queue**: The main processing queue for initial message delivery.
+2. **Retry Queue**: Handles message retries with a TTL (Time-to-Live) delay, sending messages back to the main queue or to the DLX after repeated failures.
+3. **Dead Letter Queue (DLX Queue)**: The final destination for messages that exceed the maximum retry attempts.
+4. **Exchanges**:
+    - **Retry Exchange**: Routes failed messages to the retry queue for delayed reprocessing.
+    - **DLX Exchange**: Routes messages to the final dead letter queue when retries are exhausted.
+
+### Configuration Parameters
+
+| Parameter | Description |
+| --- | --- |
+| `maxRetries` | Maximum retry attempts before a message is sent to the DLX Queue |
+| `nameSpace` | Prefix for naming exchanges, queues, and routing keys |
+| `dlxExchange` | Exchange for handling messages that need final DLX routing |
+| `retryExchange` | Exchange for retry mechanism with TTL |
+| `retryRoutingKey` | Routing key for retry messages |
+| `dlxRoutingKey` | Routing key for DLX messages |
+
+## Setup Queues and Exchanges
+
+### Queues
+
+1. **Main Queue**:
+    - Name: `${nameSpace}_main_queue`
+    - Dead Letter Exchange: `retryExchange`
+    - Dead Letter Routing Key: `retryRoutingKey`
+    - Purpose: Processes incoming messages and directs failed ones to the retry mechanism.
+2. **Retry Queue**:
+    - Name: `${nameSpace}_retry_queue`
+    - TTL: 10 seconds (configurable with `'x-message-ttl'`)
+    - Dead Letter Exchange: `dlxExchange`
+    - Dead Letter Routing Key: `dlxRoutingKey`
+    - Purpose: Holds messages for a delay period before retrying. Failed retries get routed to the DLX if maximum retries are exceeded.
+3. **DLX Queue**:
+    - Name: `${nameSpace}_dlx_queue`
+    - Purpose: Stores messages that exceed the maximum retries and are not processed successfully.
+
+### Exchanges
+
+1. **DLX Exchange**:
+    - Name: `${nameSpace}_dlx_exchange`
+    - Type: `direct`
+    - Purpose: Routes messages from the retry queue to the final dead letter queue after maximum retry attempts.
+2. **Retry Exchange**:
+    - Name: `${nameSpace}_retry_exchange`
+    - Type: `direct`
+    - Purpose: Routes failed messages from the main queue to the retry queue for delayed reprocessing.
+
+### Routing Keys
+
+- **Retry Routing Key** (`retryRoutingKey`): Used by the retry exchange to route messages to the retry queue.
+- **DLX Routing Key** (`dlxRoutingKey`): Used by the DLX exchange to route messages to the DLX queue.
+
+## Message Flow
+
+1. **Send Message**:
+    - Messages are initially sent to the **Main Queue**.
+2. **Process Message**:
+    - The consumer tries to process the message.
+    - If processing fails, the retry count (`x-retry-count`) in the message header is checked:
+        - **Retry Available**: If the retry count is below the `maxRetries`, the message is sent to the **Retry Queue** via the **Retry Exchange**.
+        - **Max Retries Reached**: If the retry count exceeds `maxRetries`, the message is sent to the **DLX Queue** via the **DLX Exchange**.
+3. **Retry Mechanism**:
+    - Messages in the retry queue wait for the defined TTL (e.g., 10 seconds) and are then routed back to the **Main Queue** for reprocessing.
+    - This continues until the maximum retry limit is reached, after which the message is routed to the DLX Queue.
+
+## Code Implementation
+
+### `setupQueues()`
+
+Sets up the main, retry, and DLX queues, and binds them to their respective exchanges:
+
+```jsx
+async function setupQueues() {
+    const connection = await amqp.connect(config.base_url);
+    const channel = await connection.createChannel();
+    ...
+    return channel;
+}
+
+```
+
+### `sendMessage()`
+
+Sends messages to a specified queue with the retry count set in the headers:
+
+```jsx
+async function sendMessage(channel, queueName, message, retries = 0) {
+    const messageOptions = {
+        persistent: true,
+        headers: { 'x-retry-count': retries },
+    };
+    await channel.sendToQueue(queueName, Buffer.from(message), messageOptions);
+}
+
+```
+
+### `consumeMessages()`
+
+Processes messages and handles retry logic:
+
+```jsx
+async function consumeMessages(channel, queueName) {
+    await channel.consume(queueName, async (msg) => {
+        if (msg) {
+            const content = msg.content.toString();
+            const retryCount = msg.properties.headers['x-retry-count'] || 0;
+
+            if (Math.random() < 0.5) {  // Simulate failure
+                if (retryCount < maxRetries) {
+                    sendMessage(channel, retryQueue, content, retryCount + 1);
+                    channel.nack(msg, false, false);
+                } else {
+                    sendMessage(channel, dlxQueue, content, retryCount + 1);
+                    channel.ack(msg, false, false);
+                }
+            } else {
+                channel.ack(msg);  // Successfully processed
+            }
+        }
+    }, { noAck: false });
+}
+
+```
+
+## Usage
+
+1. **Initialize Setup**: Run the `setupQueues` function to set up all queues and exchanges.
+2. **Send a Message**: Use `sendMessage` to send messages to the main queue.
+3. **Start Consumer**: Run `consumeMessages` to start processing messages with retry handling.
+
+This setup provides a robust mechanism for handling message retries and final dead-letter storage for failed messages, improving reliability and ensuring message traceability.
+
+### 1. `channel.assertExchange()`
+
+| Property | Type | Description |
+| --- | --- | --- |
+| `exchange` | string | The name of the exchange to declare. |
+| `type` | string | The type of the exchange (direct, fanout, topic, headers, x-delayed-message). |
+| `options` | object | Additional options for the exchange. |
+| `durable` | boolean | If set to true, the exchange will survive server restarts. Default is false. |
+| `autoDelete` | boolean | If set to true, the exchange will be deleted when there are no more queues bound to it. |
+| `internal` | boolean | If set to true, the exchange is used exclusively by the broker for internal routing. |
+| `arguments` | object | A set of arguments for configuring the exchange (e.g., setting specific exchange options). |
+
+### 2. `channel.assertQueue()`
+
+| Property | Type | Description |
+| --- | --- | --- |
+| `queue` | string | The name of the queue to declare. |
+| `options` | object | Additional options for the queue. |
+| `durable` | boolean | If set to true, the queue will survive server restarts. Default is false. |
+| `exclusive` | boolean | If set to true, the queue will be deleted when the connection that declared it closes. |
+| `autoDelete` | boolean | If set to true, the queue will be deleted when there are no consumers. |
+| `arguments` | object | A set of arguments for configuring the queue (e.g., setting TTL, DLX). |
+| `x-message-ttl` | number | Sets a time-to-live (TTL) for messages in the queue, after which they are discarded. |
+| `x-dead-letter-exchange` | string | Specifies a dead-letter exchange for messages that cannot be routed. |
+| `x-dead-letter-routing-key` | string | Routing key for the dead-letter queue. |
+
+### 3. `channel.sendToQueue()`
+
+| Property | Type | Description |
+| --- | --- | --- |
+| `queue` | string | The name of the queue to send the message to. |
+| `message` | Buffer | The message content to send. |
+| `options` | object | Additional options for sending the message. |
+| `persistent` | boolean | If set to true, the message will be saved to disk (only for durable queues). |
+
+### 4. `channel.consume()`
+
+| Property | Type | Description |
+| --- | --- | --- |
+| `queue` | string | The name of the queue to consume messages from. |
+| `onMessage` | function | A callback function to handle messages when they are received. |
+| `options` | object | Additional options for consuming messages. |
+| `noAck` | boolean | If set to true, the message will not be acknowledged. |
+
+### 5. `channel.bindQueue()`
+
+| Property | Type | Description |
+| --- | --- | --- |
+| `queue` | string | The name of the queue to bind. |
+| `exchange` | string | The name of the exchange to bind the queue to. |
+| `routingKey` | string | The routing key used for binding. |
+| `arguments` | object | Optional arguments for the binding. |
+
+### 6. `channel.unbindQueue()`
+
+| Property | Type | Description |
+| --- | --- | --- |
+| `queue` | string | The name of the queue to unbind. |
+| `exchange` | string | The name of the exchange to unbind the queue from. |
+| `routingKey` | string | The routing key used for unbinding. |
+
+### 7. `channel.publish()`
+
+| Property | Type | Description |
+| --- | --- | --- |
+| `exchange` | string | The name of the exchange to publish to. |
+| `routingKey` | string | The routing key used for the message. |
+| `message` | Buffer | The message content to send. |
+| `options` | object | Additional options for publishing the message. |
+
+### 8. `channel.close()`
+
+**Description**: Closes the channel. This will also cancel any ongoing consumption.
 
 ## Important Properties
 
