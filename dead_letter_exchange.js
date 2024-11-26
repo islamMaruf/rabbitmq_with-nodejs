@@ -1,4 +1,4 @@
-`const amqp = require('amqplib');
+const amqp = require('amqplib');
 const config = require('./config');
 
 const mainQueue = 'main_queue';
@@ -76,4 +76,3 @@ async function consumeMessages(channel, queueName) {
     // Start consuming messages from the retry queue
     consumeMessages(channel, dlxQueue);
 })();
-`
