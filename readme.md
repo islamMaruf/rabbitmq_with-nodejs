@@ -633,9 +633,7 @@ This setup provides a robust mechanism for handling message retries and final de
 | `options` | object | Additional options for publishing the message. |
 
 ### 8. `channel.close()`
-
-**Description**: Closes the channel. This will also cancel any ongoing consumption.
----
+Description: Closes the channel. This will also cancel any ongoing consumption.
 
 ## Conclusion
 
